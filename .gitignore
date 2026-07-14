@@ -1,0 +1,53 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# FastAPI/runtime generated upload files
+tmp_registry_*.csv
+tmp_payroll_*.csv
+tmp_salary_rules_*.csv
+
+# Generated/demo data and large local analysis outputs
+demo_*.csv
+payroll.csv
+registry.csv
+salary_rules.csv
+response_data.json
+*.sqlite
+*.db
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Local IDE/editor and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Local Codex/agent workspace metadata
+.agents/
+.codex/
