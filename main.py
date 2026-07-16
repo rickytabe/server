@@ -2,6 +2,7 @@ from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import json
 import os
+import re
 import uuid
 import networkx as nx
 import pandas as pd
@@ -98,11 +99,13 @@ RISK_WEIGHTS = {
     "duplicate_id": 30,
     "shared_bank_account": 25,
     "ghost_worker": 20,
+    "fuzzy_name_match": 15,
     "salary_anomaly": 15,
     "network_membership": 10,
 }
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 TOP_RISK_RECORDS_FOR_REPORT = 10
+FINANCIAL_EXPOSURE_CURRENCY = "FCFA"
 DEFAULT_REPORT_LANGUAGE = "en"
 SUPPORTED_REPORT_LANGUAGES = {
     "en": "English",
@@ -594,6 +597,34 @@ def detect_salary_anomalies(
         "statistical": find_statistical_salary_anomalies(salary_df),
     }
 
+def calculate_financial_exposure(ghost_worker_findings: dict, salary_anomaly_findings: dict) -> dict:
+    ghost_worker_exposure = 0.0
+    for record in ghost_worker_findings.get("records", []):
+        val = str(record.get("total_salary", "0"))
+        cleaned = re.sub(r"[^0-9.-]", "", val)
+        if cleaned:
+            try:
+                ghost_worker_exposure += float(cleaned)
+            except ValueError:
+                pass
+
+    rule_salary_overpayment_exposure = 0.0
+    for record in salary_anomaly_findings.get("rule_based", {}).get("records", []):
+        diff = record.get("difference", 0)
+        if isinstance(diff, (int, float)) and diff > 0:
+            rule_salary_overpayment_exposure += float(diff)
+
+    estimated_total = ghost_worker_exposure + rule_salary_overpayment_exposure
+
+    return {
+        "currency": FINANCIAL_EXPOSURE_CURRENCY,
+        "estimated_total": round(estimated_total, 2),
+        "ghost_worker_exposure": round(ghost_worker_exposure, 2),
+        "salary_rule_overpayment_exposure": round(rule_salary_overpayment_exposure, 2),
+        "statistical_salary_anomaly_exposure": None,
+        "note": "Statistical salary anomalies are excluded from estimated exposure unless a salary rule expected value exists."
+    }
+
 def employee_node_details(matricule: str, registry_row=None, payroll_row=None) -> dict:
     details = {column: "" for column in REGISTRY_FRONTEND_COLUMNS}
     details.update({
@@ -817,6 +848,8 @@ def build_fraud_networks(
     }
 
 def risk_level_for_score(score: int) -> str:
+    if score == 0:
+        return "None"
     if score <= 25:
         return "Low"
     if score <= 50:
@@ -830,7 +863,7 @@ def empty_risk_record(matricule: str) -> dict:
     record.update({
         "raw_score": 0,
         "risk_score": 0,
-        "risk_level": "Low",
+        "risk_level": "None",
         "risk_factors": [],
         "_factor_map": {},
     })
@@ -959,6 +992,39 @@ def add_salary_anomaly_risks(risk_records: dict, salary_anomaly_findings: dict):
                 },
             )
 
+def add_fuzzy_name_risks(risk_records: dict, fuzzy_name_checks: dict):
+    for source, check_result in fuzzy_name_checks.items():
+        for match in check_result.get("matches", []):
+            left = match.get("left", {})
+            right = match.get("right", {})
+            left_matricule = left.get("matricule", "")
+            right_matricule = right.get("matricule", "")
+            
+            if left_matricule:
+                add_risk_factor(
+                    risk_records,
+                    left_matricule,
+                    "fuzzy_name_match",
+                    {
+                        "source": source,
+                        "matched_matricule": right_matricule,
+                        "score": match.get("score"),
+                        "matched_name": right.get("full_name") or right.get("employee_name", ""),
+                    },
+                )
+            if right_matricule:
+                add_risk_factor(
+                    risk_records,
+                    right_matricule,
+                    "fuzzy_name_match",
+                    {
+                        "source": source,
+                        "matched_matricule": left_matricule,
+                        "score": match.get("score"),
+                        "matched_name": left.get("full_name") or left.get("employee_name", ""),
+                    },
+                )
+
 def add_network_membership_risks(risk_records: dict, fraud_network_findings: dict):
     for network in fraud_network_findings.get("networks", []):
         for matricule in network.get("member_matricules", []):
@@ -993,6 +1059,7 @@ def finalize_risk_records(risk_records: dict) -> List[dict]:
 
 def build_risk_summary(records: List[dict]) -> dict:
     level_counts = {
+        "None": 0,
         "Low": 0,
         "Moderate": 0,
         "High": 0,
@@ -1018,6 +1085,7 @@ def calculate_risk_scores(
     registry_df: pd.DataFrame,
     payroll_df: pd.DataFrame,
     duplicate_checks: dict,
+    fuzzy_name_checks: dict,
     ghost_worker_findings: dict,
     salary_anomaly_findings: dict,
     fraud_network_findings: dict,
@@ -1026,6 +1094,7 @@ def calculate_risk_scores(
 
     add_duplicate_id_risks(risk_records, duplicate_checks)
     add_shared_account_risks(risk_records, duplicate_checks)
+    add_fuzzy_name_risks(risk_records, fuzzy_name_checks)
     add_ghost_worker_risks(risk_records, ghost_worker_findings)
     add_salary_anomaly_risks(risk_records, salary_anomaly_findings)
     add_network_membership_risks(risk_records, fraud_network_findings)
@@ -1035,7 +1104,8 @@ def calculate_risk_scores(
     return {
         "weights": RISK_WEIGHTS,
         "level_mapping": {
-            "Low": "0-25",
+            "None": "0",
+            "Low": "1-25",
             "Moderate": "26-50",
             "High": "51-75",
             "Critical": "76-100",
@@ -1075,6 +1145,7 @@ def build_report_payload(
     salary_anomaly_findings: dict,
     fraud_network_findings: dict,
     risk_score_findings: dict,
+    financial_exposure: dict,
 ) -> dict:
     top_risk_records = [
         anonymized_risk_record(record, index)
@@ -1154,6 +1225,7 @@ def build_report_payload(
                 for network in largest_networks
             ],
         },
+        "financial_exposure": financial_exposure,
         "risk_summary": risk_score_findings.get("summary", {}),
         "risk_weights": risk_score_findings.get("weights", {}),
         "top_risk_records": top_risk_records,
@@ -1249,6 +1321,7 @@ def build_local_report(report_payload: dict, language: str = DEFAULT_REPORT_LANG
             f"- Reseaux de fraude trouves: {finding_counts['fraud_networks_found']}",
             "",
             "Repartition du Risque",
+            f"- Aucun risque: {risk_summary.get('level_counts', {}).get('None', 0)}",
             f"- Faible: {risk_summary.get('level_counts', {}).get('Low', 0)}",
             f"- Modere: {risk_summary.get('level_counts', {}).get('Moderate', 0)}",
             f"- Eleve: {risk_summary.get('level_counts', {}).get('High', 0)}",
@@ -1286,6 +1359,7 @@ def build_local_report(report_payload: dict, language: str = DEFAULT_REPORT_LANG
         f"- Fraud networks found: {finding_counts['fraud_networks_found']}",
         "",
         "Risk Distribution",
+        f"- None: {risk_summary.get('level_counts', {}).get('None', 0)}",
         f"- Low: {risk_summary.get('level_counts', {}).get('Low', 0)}",
         f"- Moderate: {risk_summary.get('level_counts', {}).get('Moderate', 0)}",
         f"- High: {risk_summary.get('level_counts', {}).get('High', 0)}",
@@ -1361,6 +1435,7 @@ def build_report_payload_from_results(results: dict) -> dict:
         results["salary_anomaly_findings"],
         results["fraud_network_findings"],
         results["risk_score_findings"],
+        results.get("financial_exposure", {}),
     )
 
 def get_completed_job(job_id: str) -> dict:
@@ -1474,10 +1549,13 @@ def process_payroll_data(
             registry_df,
             payroll_df,
             duplicate_checks,
+            fuzzy_name_checks,
             ghost_worker_findings,
             salary_anomaly_findings,
             fraud_network_findings,
         )
+
+        financial_exposure = calculate_financial_exposure(ghost_worker_findings, salary_anomaly_findings)
 
         jobs[job_id]["step"] = "building_response"
         stats = {
@@ -1495,6 +1573,7 @@ def process_payroll_data(
             "fraud_networks_found": fraud_network_findings["network_count"],
             "employees_with_risk": risk_score_findings["summary"]["employees_with_risk"],
             "highest_risk_score": risk_score_findings["summary"]["highest_risk_score"],
+            "estimated_financial_exposure": financial_exposure["estimated_total"],
         }
 
         jobs[job_id]["status"] = "completed"
@@ -1519,6 +1598,7 @@ def process_payroll_data(
             "ghost_workers": ghost_worker_findings,
             "salary_anomaly_findings": salary_anomaly_findings,
             "fraud_network_findings": fraud_network_findings,
+            "financial_exposure": financial_exposure,
             "risk_score_findings": risk_score_findings,
             "ai_summary": build_ai_summary_marker(job_id, jobs[job_id]),
         }
