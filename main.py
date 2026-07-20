@@ -7,6 +7,7 @@ import uuid
 import networkx as nx
 import pandas as pd
 from google import genai
+from google.genai import types
 from rapidfuzz import fuzz
 from sklearn.ensemble import IsolationForest
 from typing import Dict, List, Optional, Set
@@ -103,7 +104,7 @@ RISK_WEIGHTS = {
     "salary_anomaly": 15,
     "network_membership": 10,
 }
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
 TOP_RISK_RECORDS_FOR_REPORT = 10
 FINANCIAL_EXPOSURE_CURRENCY = "FCFA"
 DEFAULT_REPORT_LANGUAGE = "en"
@@ -1282,7 +1283,6 @@ def build_report_prompt(report_payload: dict, language: str = DEFAULT_REPORT_LAN
     language = normalize_report_language(language)
     payload_json = json.dumps(report_payload, indent=2)
     language_name = SUPPORTED_REPORT_LANGUAGES[language]
-    section_headings = REPORT_SECTION_HEADINGS[language]
 
     return f"""
 You are Sentinel Gov's report writer.
@@ -1292,9 +1292,31 @@ Write the entire report in {language_name}. Do not switch languages.
 Rules:
 - Do not invent findings, counts, employee names, IDs, bank accounts, or legal conclusions.
 - The detection was already done by deterministic code. Your job is explanation only.
-- Use clear section headings in {language_name}: {section_headings}.
 - Mention that salary rule checks are optional and may be skipped if no rules file was supplied.
 - Keep the tone professional and suitable for an auditor or public-sector payroll reviewer.
+
+You MUST output EXACTLY a JSON object matching this schema. Do NOT output markdown blocks (like ```json), just the raw JSON object:
+{{
+  "executiveSummary": "A brief 2-3 sentence overview of the audit scope and highest level risks.",
+  "keyFindings": [
+    {{
+      "title": "Short title of finding",
+      "description": "1 sentence description",
+      "severity": "critical|high|moderate|low|info",
+      "metric": "e.g. 5 duplicate IDs"
+    }}
+  ],
+  "riskDistribution": "1-2 sentences summarizing the risk spread.",
+  "fraudNetworks": "Summary of the network analysis.",
+  "salaryAnomalies": "Summary of salary anomalies.",
+  "recommendedNextSteps": [
+    {{
+      "action": "Actionable step",
+      "rationale": "Why this step is needed"
+    }}
+  ],
+  "dataAndPrivacyNotes": "Standard disclaimer about deterministic checks and privacy."
+}}
 
 JSON summary:
 {payload_json}
@@ -1308,80 +1330,39 @@ def build_local_report(report_payload: dict, language: str = DEFAULT_REPORT_LANG
     salary_summary = report_payload["salary_anomaly_summary"]
 
     if language == "fr":
-        lines = [
-            "Resume Executif",
-            f"Sentinel Gov a examine {report_payload['analysis_scope']['total_registry_records']} dossiers du registre et {report_payload['analysis_scope']['total_payroll_records']} dossiers de paie.",
-            f"{risk_summary.get('employees_with_risk', 0)} employes presentent au moins un facteur de risque. Le score de risque le plus eleve est {risk_summary.get('highest_risk_score', 0)}.",
-            "",
-            "Principaux Constats",
-            f"- Identifiants nationaux dupliques trouves: {finding_counts['duplicate_national_ids_found']}",
-            f"- Comptes bancaires dupliques trouves: {finding_counts['duplicate_bank_accounts_found']}",
-            f"- Travailleurs fantomes potentiels trouves: {finding_counts['potential_ghost_workers']}",
-            f"- Correspondances de noms approximatives trouvees: {finding_counts['registry_fuzzy_name_matches_found'] + finding_counts['payroll_fuzzy_name_matches_found']}",
-            f"- Reseaux de fraude trouves: {finding_counts['fraud_networks_found']}",
-            "",
-            "Repartition du Risque",
-            f"- Aucun risque: {risk_summary.get('level_counts', {}).get('None', 0)}",
-            f"- Faible: {risk_summary.get('level_counts', {}).get('Low', 0)}",
-            f"- Modere: {risk_summary.get('level_counts', {}).get('Moderate', 0)}",
-            f"- Eleve: {risk_summary.get('level_counts', {}).get('High', 0)}",
-            f"- Critique: {risk_summary.get('level_counts', {}).get('Critical', 0)}",
-            "",
-            "Reseaux de Fraude",
-            f"L'analyse de graphe a utilise {network_summary.get('algorithm')} et a detecte {network_summary.get('network_count', 0)} reseau(x) connecte(s).",
-            "",
-            "Anomalies Salariales",
-            f"Anomalies basees sur les regles salariales: {salary_summary['rule_based'].get('anomaly_count', 0)}.",
-            f"Anomalies statistiques salariales: {salary_summary['statistical'].get('anomaly_count', 0)}.",
-            "Les controles par regles salariales sont optionnels et peuvent etre ignores si aucun fichier de regles n'a ete fourni.",
-            "",
-            "Prochaines Etapes Recommandees",
-            "- Examiner d'abord les employes ayant le risque le plus eleve.",
-            "- Verifier les comptes bancaires partages et les identifiants dupliques avec les documents sources.",
-            "- Enqueter sur les travailleurs fantomes avant l'approbation de la paie.",
-            "- Ajouter des regles salariales propres a l'organisation si les controles par regles ont ete ignores.",
-            "",
-            "Notes sur les Donnees et la Confidentialite",
-            "Ce rapport repose sur des statistiques produites par des controles deterministes. Le redacteur IA n'a pas recu de lignes CSV brutes ni de donnees personnelles en masse.",
-        ]
-        return "\n".join(lines)
+        obj = {
+            "executiveSummary": f"Sentinel Gov a examiné {report_payload['analysis_scope']['total_registry_records']} dossiers du registre et {report_payload['analysis_scope']['total_payroll_records']} dossiers de paie. {risk_summary.get('employees_with_risk', 0)} employés présentent au moins un facteur de risque.",
+            "keyFindings": [
+                {"title": "Identifiants nationaux dupliqués", "description": "Correspondances exactes d'identifiants.", "severity": "high", "metric": f"{finding_counts['duplicate_national_ids_found']}"},
+                {"title": "Comptes bancaires partagés", "description": "Comptes recevant plusieurs salaires.", "severity": "high", "metric": f"{finding_counts['duplicate_bank_accounts_found']}"},
+                {"title": "Travailleurs fantômes", "description": "Non trouvés dans le registre.", "severity": "critical", "metric": f"{finding_counts['potential_ghost_workers']}"}
+            ],
+            "riskDistribution": f"Faible: {risk_summary.get('level_counts', {}).get('Low', 0)}, Modéré: {risk_summary.get('level_counts', {}).get('Moderate', 0)}, Élevé: {risk_summary.get('level_counts', {}).get('High', 0)}, Critique: {risk_summary.get('level_counts', {}).get('Critical', 0)}",
+            "fraudNetworks": f"L'analyse de graphe a détecté {network_summary.get('network_count', 0)} réseau(x) connecté(s).",
+            "salaryAnomalies": f"Anomalies par règles: {salary_summary['rule_based'].get('anomaly_count', 0)}. Anomalies statistiques: {salary_summary['statistical'].get('anomaly_count', 0)}.",
+            "recommendedNextSteps": [
+                {"action": "Examiner le risque le plus élevé", "rationale": "Prioriser les employés critiques."}
+            ],
+            "dataAndPrivacyNotes": "Ce rapport repose sur des statistiques produites par des contrôles déterministes."
+        }
+        return json.dumps(obj)
 
-    lines = [
-        "Executive Summary",
-        f"Sentinel Gov reviewed {report_payload['analysis_scope']['total_registry_records']} registry records and {report_payload['analysis_scope']['total_payroll_records']} payroll records.",
-        f"{risk_summary.get('employees_with_risk', 0)} employees received at least one risk factor. The highest risk score was {risk_summary.get('highest_risk_score', 0)}.",
-        "",
-        "Key Findings",
-        f"- Duplicate national IDs found: {finding_counts['duplicate_national_ids_found']}",
-        f"- Duplicate bank accounts found: {finding_counts['duplicate_bank_accounts_found']}",
-        f"- Potential ghost workers found: {finding_counts['potential_ghost_workers']}",
-        f"- Fuzzy name matches found: {finding_counts['registry_fuzzy_name_matches_found'] + finding_counts['payroll_fuzzy_name_matches_found']}",
-        f"- Fraud networks found: {finding_counts['fraud_networks_found']}",
-        "",
-        "Risk Distribution",
-        f"- None: {risk_summary.get('level_counts', {}).get('None', 0)}",
-        f"- Low: {risk_summary.get('level_counts', {}).get('Low', 0)}",
-        f"- Moderate: {risk_summary.get('level_counts', {}).get('Moderate', 0)}",
-        f"- High: {risk_summary.get('level_counts', {}).get('High', 0)}",
-        f"- Critical: {risk_summary.get('level_counts', {}).get('Critical', 0)}",
-        "",
-        "Fraud Networks",
-        f"The graph analysis used {network_summary.get('algorithm')} and found {network_summary.get('network_count', 0)} connected network(s).",
-        "",
-        "Salary Anomalies",
-        f"Rule-based salary anomalies: {salary_summary['rule_based'].get('anomaly_count', 0)}.",
-        f"Statistical salary anomalies: {salary_summary['statistical'].get('anomaly_count', 0)}.",
-        "",
-        "Recommended Next Steps",
-        "- Review the highest-risk employees first.",
-        "- Validate shared bank account and duplicate ID findings against source documents.",
-        "- Investigate ghost workers before payroll approval.",
-        "- Add organization-specific salary rules if rule-based salary checks were skipped.",
-        "",
-        "Data And Privacy Notes",
-        "This report is based on summary statistics generated by deterministic checks. The AI report writer did not receive raw CSV rows or bulk PII.",
-    ]
-    return "\n".join(lines)
+    obj = {
+        "executiveSummary": f"Sentinel Gov reviewed {report_payload['analysis_scope']['total_registry_records']} registry records and {report_payload['analysis_scope']['total_payroll_records']} payroll records. {risk_summary.get('employees_with_risk', 0)} employees received at least one risk factor.",
+        "keyFindings": [
+            {"title": "Duplicate National IDs", "description": "Exact matches found across records.", "severity": "high", "metric": f"{finding_counts['duplicate_national_ids_found']}"},
+            {"title": "Shared Bank Accounts", "description": "Multiple salaries deposited into one account.", "severity": "high", "metric": f"{finding_counts['duplicate_bank_accounts_found']}"},
+            {"title": "Ghost Workers", "description": "Employees not found in registry.", "severity": "critical", "metric": f"{finding_counts['potential_ghost_workers']}"}
+        ],
+        "riskDistribution": f"Low: {risk_summary.get('level_counts', {}).get('Low', 0)}, Moderate: {risk_summary.get('level_counts', {}).get('Moderate', 0)}, High: {risk_summary.get('level_counts', {}).get('High', 0)}, Critical: {risk_summary.get('level_counts', {}).get('Critical', 0)}",
+        "fraudNetworks": f"The graph analysis found {network_summary.get('network_count', 0)} connected network(s).",
+        "salaryAnomalies": f"Rule-based: {salary_summary['rule_based'].get('anomaly_count', 0)}. Statistical: {salary_summary['statistical'].get('anomaly_count', 0)}.",
+        "recommendedNextSteps": [
+            {"action": "Review highest risk", "rationale": "Prioritize critical employees."}
+        ],
+        "dataAndPrivacyNotes": "This report is based on summary statistics generated by deterministic checks."
+    }
+    return json.dumps(obj)
 
 def generate_ai_report(report_payload: dict, language: str = DEFAULT_REPORT_LANGUAGE) -> dict:
     language = normalize_report_language(language)
@@ -1405,9 +1386,19 @@ def generate_ai_report(report_payload: dict, language: str = DEFAULT_REPORT_LANG
             contents=build_report_prompt(report_payload, language),
             config={
                 "temperature": 0.2,
+                "response_mime_type": "application/json",
             },
         )
         report_text = getattr(response, "text", "") or fallback_text
+        
+        # Remove any lingering markdown blocks if the model ignored the instruction
+        if report_text.startswith("```"):
+            lines = report_text.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            report_text = "\n".join(lines).strip()
 
         return {
             "enabled": True,
@@ -1768,6 +1759,65 @@ def create_ai_summary(
                 "error_type": type(exc).__name__,
             },
         )
+
+@app.post("/api/v1/digitize-paper")
+async def digitize_paper(file: UploadFile = File(...)):
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            status_code=500,
+            detail="No GEMINI_API_KEY or GOOGLE_API_KEY was found in the environment.",
+        )
+    
+    file_bytes = await file.read()
+    mime_type = file.content_type or "image/jpeg"
+
+    # Only accept images for now to keep things simple
+    if not mime_type.startswith("image/"):
+        raise HTTPException(
+            status_code=400,
+            detail="Only image files (PNG, JPEG, etc.) are supported for digitization.",
+        )
+
+    prompt = (
+        "Extract ALL tabular data from this image exactly as presented. "
+        "Output ONLY valid CSV format. Do not use markdown blocks like ```csv. "
+        "The first row of the CSV MUST be the column headers matching exactly what is written in the image. "
+        "Do not invent columns, do not skip any columns, and do not split columns that are merged in the image (e.g. if the image says 'Full Name', do not split into first/last). "
+        "Capture every row of data visible with high accuracy."
+    )
+
+    try:
+        client = genai.Client(api_key=api_key)
+        
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=[
+                prompt,
+                types.Part.from_bytes(data=file_bytes, mime_type=mime_type)
+            ]
+        )
+        csv_text = response.text.strip()
+        
+        # Remove any lingering markdown blocks if the model ignored the instruction
+        if csv_text.startswith("```"):
+            lines = csv_text.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            csv_text = "\n".join(lines).strip()
+
+        return {"csv_data": csv_text}
+    except Exception as exc:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"Digitize Error: {exc}\n{error_trace}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Digitization failed: {type(exc).__name__} - {str(exc)}",
+        )
+
 
 @app.get("/")
 def root():
