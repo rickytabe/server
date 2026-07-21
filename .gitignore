@@ -41,7 +41,6 @@ tmp/
 temp/
 
 # Local IDE/editor and OS files
-.vscode/
 .idea/
 *.swp
 *.swo
@@ -51,3 +50,7 @@ Thumbs.db
 # Local Codex/agent workspace metadata
 .agents/
 .codex/
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
+.gitignore

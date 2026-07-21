@@ -224,11 +224,10 @@ def build_name_records(df: pd.DataFrame, name_column: str, output_columns: List[
     selected_columns = existing_columns(df, output_columns)
     records = []
 
-    for row_index, row in df[df[name_column] != ""].iterrows():
+    for row in df[df[name_column] != ""].to_dict('records'):
         records.append({
-            "row_index": int(row_index),
             "name": row[name_column],
-            "details": row[selected_columns].to_dict(),
+            "details": {col: row.get(col) for col in selected_columns},
         })
 
     return records
@@ -407,7 +406,7 @@ def build_salary_rule_lookup(salary_rules_df: Optional[pd.DataFrame]) -> dict:
     invalid_rule_count = 0
     duplicate_rule_count = 0
 
-    for _, row in salary_rules_df.iterrows():
+    for row in salary_rules_df.to_dict('records'):
         key = salary_rule_key(row)
         expected_salary = row["expected_salary_number"]
 
@@ -500,7 +499,7 @@ def find_rule_based_salary_anomalies(
     records_checked = 0
     rule_lookup = rule_info["rules"]
 
-    for _, row in salary_df.iterrows():
+    for row in salary_df.to_dict('records'):
         actual_salary = row["total_salary_number"]
         if pd.isna(actual_salary):
             invalid_salary_count += 1
@@ -569,7 +568,7 @@ def find_statistical_salary_anomalies(salary_df: pd.DataFrame) -> dict:
     anomaly_rows = valid_salary_df[valid_salary_df["ml_prediction"] == -1]
 
     records = []
-    for _, row in anomaly_rows.sort_values(by="ml_score").iterrows():
+    for row in anomaly_rows.sort_values(by="ml_score").to_dict('records'):
         record = salary_record(row)
         record.update({
             "actual_salary": round(float(row["total_salary_number"]), 2),
@@ -651,11 +650,11 @@ def employee_node_details(matricule: str, registry_row=None, payroll_row=None) -
 def add_employee_nodes(graph: nx.Graph, registry_df: pd.DataFrame, payroll_df: pd.DataFrame):
     registry_by_matricule = {
         row["matricule"]: row
-        for _, row in registry_df[registry_df["matricule"] != ""].iterrows()
+        for row in registry_df[registry_df["matricule"] != ""].to_dict('records')
     }
     payroll_by_matricule = {
         row["matricule"]: row
-        for _, row in payroll_df[payroll_df["matricule"] != ""].iterrows()
+        for row in payroll_df[payroll_df["matricule"] != ""].to_dict('records')
     }
 
     all_matricules = sorted(set(registry_by_matricule) | set(payroll_by_matricule))
@@ -873,11 +872,11 @@ def empty_risk_record(matricule: str) -> dict:
 def build_risk_records(registry_df: pd.DataFrame, payroll_df: pd.DataFrame) -> dict:
     registry_by_matricule = {
         row["matricule"]: row
-        for _, row in registry_df[registry_df["matricule"] != ""].iterrows()
+        for row in registry_df[registry_df["matricule"] != ""].to_dict('records')
     }
     payroll_by_matricule = {
         row["matricule"]: row
-        for _, row in payroll_df[payroll_df["matricule"] != ""].iterrows()
+        for row in payroll_df[payroll_df["matricule"] != ""].to_dict('records')
     }
 
     risk_records = {}
